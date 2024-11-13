@@ -50,10 +50,11 @@ $$
 ### cuda kernel 实现
 
 
-
-
-
 ## layer normalization kernel
 
-
-
+layer norm 对每一次的输入进行归一化，然后进行线性变换，公式如下：
+$$
+y = \gamma \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta
+$$
+其中$\mu$是均值，$\sigma$是方差，$\gamma$和$\beta$是可学习的参数，$\epsilon$是一个很小的数，用于防止分母为0。
+输入是B,T,C的tensor，对于每一个C的channel，计算均值和方差，然后对每一个元素进行归一化。
