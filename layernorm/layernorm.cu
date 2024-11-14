@@ -215,3 +215,87 @@ __global__ void layernorm_kernel3(const floatX* __restrict__ in, floatX* __restr
     }
 }
 // kernel4 : use var(x) = mean(x**2) - mean(x)**2, and implement without cooperative-groups
+// one warp for one row
+__global__ void layernorm_kernel4(
+    const floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C)
+{
+    // input : [N, C]
+    // warp-level reduction
+    int tid = threadIdx.x;
+    int warp_id = tid / WARP_SIZE;
+    int lane_id = tid % WARP_SIZE;
+    int warpPerBlock = blockDim.x / WARP_SIZE;
+    int row = blockIdx.x * warpPerBlock + warp_id;
+    if (row >= N)
+    {
+        return;
+    }
+    const floatX* in_ptr = in + row * C;
+    floatX* out_ptr = out + row * C;
+
+    floatX sum = 0.f;
+    floatX sum_2 = 0.f;
+    // 线程粗化
+    for (int i = lane_id; i < C; i += WARP_SIZE)
+    {
+        sum += in_ptr[i];
+        sum_2 += in_ptr[i] * in_ptr[i];
+    }
+    // warp-level reduction
+    for (int offset = WARP_SIZE / 2; offset >= 1; offset >>= 1)
+    {
+        __syncwarp();
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+        sum_2 += __shfl_down_sync(0xFFFFFFFF, sum_2, offset);
+    }
+    floatX m = sum / C;
+    floatX m_2 = sum_2 / C;
+    floatX s = 1.f / sqrtf(m_2 - m * m + 1e-5f);
+    // broadcast to thread in the same warp
+    __syncwarp();
+    for (int i = lane_id; i < C; i += WARP_SIZE)
+    {
+        floatX norm = (in_ptr[i] - m) * s;
+        out_ptr[i] = norm * weight[i] + bias[i];
+    }
+
+    if (lane_id == 0)
+    {
+        mean[row] = m;
+        rstd[row] = s;
+    }
+}
+
+//_________________________KERNEL LAUNCHER____________________________//
+
+void layernorm1(
+    floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C, int block_size)
+{
+}
+void layernorm2(
+    floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C, int block_size)
+{
+}
+void layernorm3(
+    floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C, int block_size)
+{
+}
+void layernorm4(
+    floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C, int block_size)
+{
+}
+
+//__________________________KERNLE DISPATCHER_________________________//
+void layernorm(int kernel_id, floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N,
+    int C, int block_size)
+{
+    switch (kernel_id)
+    {
+    case 1: layernorm1(in, out, mean, rstd, weight, bias, N, C, block_size); break;
+    case 2: layernorm2(in, out, mean, rstd, weight, bias, N, C, block_size); break;
+    case 3: layernorm3(in, out, mean, rstd, weight, bias, N, C, block_size); break;
+    case 4: layernorm4(in, out, mean, rstd, weight, bias, N, C, block_size); break;
+    default: printf("Invalid kernel id: %d\n", kernel_id); break;
+    }
+}
+//__________________________MAIN______________________________________//
