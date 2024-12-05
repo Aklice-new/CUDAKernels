@@ -51,6 +51,7 @@ $$
 
 
 ## layer normalization kernel
+[layernorm](https://arxiv.org/pdf/1607.06450.pdf)
 
 layer norm 对每一次的输入进行归一化，然后进行线性变换，公式如下：
 $$
@@ -58,3 +59,87 @@ y = \gamma \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta
 $$
 其中$\mu$是均值，$\sigma$是方差，$\gamma$和$\beta$是可学习的参数，$\epsilon$是一个很小的数，用于防止分母为0。
 输入是B,T,C的tensor，对于每一个C的channel，计算均值和方差，然后对每一个元素进行归一化。
+
+### kernel实现
+对于每一个channel，计算均值和方差，然后对每一个元素进行归一化。
+需要计算一次均值和方差，先计算均值，然后计算方差，然后对每一个元素进行归一化。
+或者通过方差的公式，可以直接计算方差。
+计算均值和方差就是传统的reduce操作，可以通过不同level的Reduce来实现。
+
+## self-attention kernel
+[self-attention paper](https://arxiv.org/pdf/1706.03762.pdf)
+
+self-attention是transformer的核心组件，通过计算query,key,value的**内积**，然后通过softmax得到attention的权重，然后对value进行**内积**，得到最终的输出。
+
+$$
+Attention = softmax(\frac{QK^T}{\sqrt{d_k}})V
+$$
+
+其中
+Q : [B, T, D_K]
+K : [B, T, D_K]
+V : [B, T, D_V]
+
+
+```python
+# Self Attention
+import torch
+import torch.nn
+from math import sqrt
+
+class SelfAttention(nn.Module):
+    # input : B * T * D
+    # Q     : B * D * D_K
+    # K     : B * D * D_K
+    # V     : B * D * D_V
+    def __init(self, input_dim, dim_k, dim_v):
+        super(SelfAttention, self).__init__()
+        self.Q = nn.Linear(input_dim, dim_k)
+        self.K = nn.Linear(input_dim, dim_k)
+        self.V = nn.Linear(input_dim, dim_v)
+        self._norm_factor = 1.0 / sqrt(dim_k)
+    
+    def forward(self, x):
+        q = self.Q(x) # B * T * D_K
+        k = self.K(x) # B * T * D_K
+        v = self.V(x) # B * T * D_V
+        
+        attention = torch.bmm(q, k.permute(0, 2, 1)) # B * T * T
+        attention = nn.Softmax(dim=-1)(attention) * self._norm_factor # B * T * T
+
+        output = torch.bmm(attention, v) # B * T * D_V
+
+        return output
+
+# Multi-head Attention
+class MultiHeadAttention(nn.Module):
+    # input : B * T * D
+    # Q     : B * D * D_K  // num_heads
+    # K     : B * D * D_K // num_heads
+    # V     : B * D * D_V // num_heads
+    def __init__(self, input_dim, dim_k, dim_v, num_heads):
+        super(MultiHeadAttention, self).__init__()
+        self.Q = nn.Linear(input_dim, dim_k)
+        self.K = nn.Linear(input_dim, dim_k)
+        self.V = nn.Linear(input_dim, dim_v)
+        self.head_size = dim_k // num_heads
+        self.num_heads = num_heads
+        self.dim_k = dim_k
+        self.dim_v = dim_v
+        self._norm_factor = 1.0 / sqrt(head_size)
+
+    def forward(self, x):
+        q = self.Q(x).view(B, T, num_heads, dim_k // self.num_heads) # B * T * num_heads * head_size
+        k = self.K(x).view(B, T, num_heads, dim_k // self.num_heads) # B * T * num_heads * head_size
+        v = self.V(x).view(B, T, num_heads, dim_v // self.num_heads) # B * T * num_heads * head_size
+
+        attention = torch.bmm(q, k.permute(0, 1, 3, 2)) # B * num_heads * T * T
+        attention = nn.Softmax(dim=-1)(attention) * self._norm_factor # B * num_heads * T * T
+
+        output = torch.bmm(attention, v) # B * num_heads * T * head_size
+        output = output.view(B, T, dim_v) # B * T * D_V
+
+        return output
+
+
+```
