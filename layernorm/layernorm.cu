@@ -1,5 +1,4 @@
 #include <cmath>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -7,6 +6,8 @@
 #include <cuda.h>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 
 #include "common.h"
 
@@ -87,70 +88,95 @@ __global__ void layernorm_kernel1(
 __global__ void mean_kernel(const floatX* in, floatX* mean, int N, int C)
 {
     // input : [N, C]
-    extern __shared__ floatX s_data[]; // [0, blockDim)
-    int idx = blockIdx.x;
-    int tid = threadIdx.x;
-    if (tid >= C)
+    // extern __shared__ floatX s_data[]; // [0, blockDim)
+    // int idx = blockIdx.x;
+    // int tid = threadIdx.x;
+    // if (tid >= C)
+    // {
+    //     return;
+    // }
+    // const floatX* in_ptr = in + idx * C;
+    // floatX sum = 0.f;
+    // // 线程粗化
+    // for (int i = tid; i < C; i += blockDim.x)
+    // {
+    //     sum += in_ptr[i];
+    // }
+    // s_data[tid] = sum;
+    // __syncthreads();
+    // // block-level reduction
+    // for (int stride = blockDim.x / 2; stride >= 1; stride >>= 1)
+    // {
+    //     if (tid < stride)
+    //     {
+    //         s_data[tid] += s_data[tid + stride];
+    //     }
+    //     __syncthreads();
+    // }
+    // if (tid == 0)
+    // {
+    //     mean[idx] = s_data[0] / C;
+    // }
+    extern __shared__ float shared[];
+    int idx = blockIdx.x;  // range [0, B*T)
+    int tid = threadIdx.x; // range [0, block_size)
+    const float* x = in + idx * C;
+    int block_size = blockDim.x;
+    // thread coarsening
+    float sum = 0.0f;
+    for (int i = tid; i < C; i += block_size)
     {
-        return;
+        sum += x[i];
     }
-    const floatX* in_ptr = in + idx * C;
-    floatX sum = 0.f;
-    // 线程粗化
-    for (int i = tid; i < C; i += blockDim.x)
-    {
-        sum += in_ptr[i];
-    }
-    s_data[tid] = sum;
+    shared[tid] = sum;
     __syncthreads();
-    // block-level reduction
-    for (int stride = blockDim.x / 2; stride >= 1; stride >>= 1)
+    // reductions
+    for (int stride = block_size / 2; stride >= 1; stride /= 2)
     {
+        __syncthreads();
         if (tid < stride)
         {
-            s_data[tid] += s_data[tid + stride];
+            shared[tid] += shared[tid + stride];
         }
-        __syncthreads();
     }
+    // write the final result (at thread 0) to global memory
     if (tid == 0)
     {
-        mean[idx] = s_data[0] / C;
+        mean[idx] = shared[0] / C;
     }
 }
 // calculate rstd kernel
 // logic is same as mean
 __global__ void rstd_kernel(const floatX* in, floatX* mean, floatX* rstd, int N, int C)
 {
-    extern __shared__ floatX s_data[]; // [0, blockDim.x)
-    int idx = blockIdx.x;
-    int tid = threadIdx.x;
-    const floatX* in_ptr = in + idx * C;
-    if (tid > C)
+    extern __shared__ float shared[];
+    int idx = blockIdx.x;  // range [0, B*T)
+    int tid = threadIdx.x; // range [0, block_size)
+    const float* x = in + idx * C;
+    int block_size = blockDim.x;
+    float m = mean[idx];
+    // thread coarsening
+    float sum = 0.0f;
+    for (int i = tid; i < C; i += block_size)
     {
-        return;
+        float diff = x[i] - m;
+        sum += diff * diff;
     }
-    floatX diff_sum = 0.f;
-    floatX m = mean[idx];
-    // 线程粗化
-    for (int i = tid; i < C; i += blockDim.x)
-    {
-        floatX diff = in_ptr[tid] - m;
-        diff_sum += diff * diff;
-    }
-    s_data[tid] = diff_sum;
+    shared[tid] = sum;
     __syncthreads();
-    // block-level reducion
-    for (int stride = blockDim.x / 2; stride >= 1; stride >>= 1)
+    // reductions
+    for (int stride = block_size / 2; stride >= 1; stride /= 2)
     {
+        __syncthreads();
         if (tid < stride)
         {
-            s_data[tid] += s_data[tid + stride];
+            shared[tid] += shared[tid + stride];
         }
-        __syncthreads();
     }
+    // write the final result (at thread 0) to global memory
     if (tid == 0)
     {
-        rstd[idx] = 1.f / sqrtf(s_data[0] / C + 1e-5f);
+        rstd[idx] = 1.0f / sqrtf(shared[0] / C + 1e-5f);
     }
 }
 // normalize
@@ -164,7 +190,7 @@ __global__ void norm_kernel(
     floatX m = mean[row];
     floatX s = rstd[row];
     floatX xi = in[idx];
-    floatX n = s * (xi - m);
+    floatX n = (xi - m) * s;
     floatX o = n * weight[col] + bias[col];
 
     out[idx] = o;
@@ -197,7 +223,7 @@ __global__ void layernorm_kernel3(const floatX* __restrict__ in, floatX* __restr
     for (int i = warp.thread_rank(); i < C; i += warp.size())
     {
         floatX diff = in_ptr[i] - m;
-        diff_sum = diff * diff;
+        diff_sum += diff * diff;
     }
     diff_sum = cg::reduce(warp, diff_sum, cg::plus<floatX>{});
     floatX s = 1.f / sqrtf(diff_sum / C + 1e-5f);
@@ -250,12 +276,15 @@ __global__ void layernorm_kernel4(
     }
     floatX m = sum / C;
     floatX m_2 = sum_2 / C;
-    floatX s = 1.f / sqrtf(m_2 - m * m + 1e-5f);
+    floatX s = rsqrtf(m_2 - m * m + 1e-5f);
     // broadcast to thread in the same warp
-    __syncwarp();
+    m = __shfl_sync(0xFFFFFFFF, m, 0);
+    s = __shfl_sync(0xFFFFFFFF, s, 0);
     for (int i = lane_id; i < C; i += WARP_SIZE)
     {
+        // normalize
         floatX norm = (in_ptr[i] - m) * s;
+        // scale and shift
         out_ptr[i] = norm * weight[i] + bias[i];
     }
 
@@ -271,18 +300,41 @@ __global__ void layernorm_kernel4(
 void layernorm1(
     floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C, int block_size)
 {
+    int grid_size = CEIL_DIV(N, block_size);
+    layernorm_kernel1<<<grid_size, block_size>>>(in, out, mean, rstd, weight, bias, N, C);
+    cudaCheck(cudaGetLastError());
 }
 void layernorm2(
     floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C, int block_size)
 {
+
+    // mean
+    int grid_size = N;
+    size_t shm_size = block_size * sizeof(floatX);
+    mean_kernel<<<grid_size, block_size, shm_size>>>(in, mean, N, C);
+    cudaCheck(cudaGetLastError());
+    // rstd
+    rstd_kernel<<<grid_size, block_size, shm_size>>>(in, mean, rstd, N, C);
+    cudaCheck(cudaGetLastError());
+    // norm
+    const int block_size2 = 256;
+    grid_size = CEIL_DIV(N * C, block_size2);
+    norm_kernel<<<grid_size, block_size2>>>(in, out, mean, rstd, weight, bias, N, C);
+    cudaCheck(cudaGetLastError());
 }
 void layernorm3(
     floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C, int block_size)
 {
+    int grid_size = CEIL_DIV(N * 32, block_size);
+    layernorm_kernel3<<<grid_size, block_size>>>(in, out, mean, rstd, weight, bias, N, C);
+    cudaCheck(cudaGetLastError());
 }
 void layernorm4(
     floatX* in, floatX* out, floatX* mean, floatX* rstd, floatX* weight, floatX* bias, int N, int C, int block_size)
 {
+    int grid_size = CEIL_DIV(N * 32, block_size);
+    layernorm_kernel4<<<grid_size, block_size>>>(in, out, mean, rstd, weight, bias, N, C);
+    cudaCheck(cudaGetLastError());
 }
 
 //__________________________KERNLE DISPATCHER_________________________//
@@ -299,3 +351,89 @@ void layernorm(int kernel_id, floatX* in, floatX* out, floatX* mean, floatX* rst
     }
 }
 //__________________________MAIN______________________________________//
+
+int main(int argc, char* argv[])
+{
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    printf("Device: %s\n", prop.name);
+    int kernel_id = 1;
+    if (argc > 1)
+    {
+        kernel_id = atoi(argv[1]);
+    }
+    printf("Using kernel %d\n", kernel_id);
+
+    // create input and output
+    // a + b = c
+    int N = 8 * 1024;
+    int C = 768;
+    // host memory
+    thrust::host_vector<float> h_in(N * C);
+    thrust::host_vector<float> h_out(N * C);
+    thrust::host_vector<float> h_mean(N);
+    thrust::host_vector<float> h_rstd(N);
+    thrust::host_vector<float> h_weight(C);
+    thrust::host_vector<float> h_bias(C);
+
+    make_random_float(h_in.data(), N * C);
+    make_random_float(h_out.data(), N * C);
+    make_zeros_float(h_mean.data(), N);
+    make_zeros_float(h_rstd.data(), N);
+    make_random_float(h_weight.data(), C);
+    make_random_float(h_bias.data(), C);
+
+    // device memory
+    thrust::device_vector<floatX> d_in(N * C);
+    thrust::device_vector<floatX> d_out(N * C);
+    thrust::device_vector<float> d_mean(N);
+    thrust::device_vector<float> d_rstd(N);
+    thrust::device_vector<float> d_weight(C);
+    thrust::device_vector<float> d_bias(C);
+    cudaCheck(type_convert_memcpy(d_in.data().get(), h_in.data(), N * C));
+    cudaCheck(type_convert_memcpy(d_out.data().get(), h_out.data(), N * C));
+    cudaCheck(type_convert_memcpy(d_mean.data().get(), h_mean.data(), N));
+    cudaCheck(type_convert_memcpy(d_rstd.data().get(), h_rstd.data(), N));
+    cudaCheck(type_convert_memcpy(d_weight.data().get(), h_weight.data(), C));
+    cudaCheck(type_convert_memcpy(d_bias.data().get(), h_bias.data(), C));
+
+    // cpu
+    layernorm_cpu(h_in.data(), h_out.data(), h_mean.data(), h_rstd.data(), h_weight.data(), h_bias.data(), N, C);
+
+    // time the kernel at different block sizes
+    int block_sizes[] = {32, 64, 128, 256, 512, 1024};
+    for (int j = 0; j < sizeof(block_sizes) / sizeof(int); j++)
+    {
+        int block_size = block_sizes[j];
+        printf("Checking block size %d.\n", block_size);
+        layernorm(kernel_id, d_in.data().get(), d_out.data().get(), d_mean.data().get(), d_rstd.data().get(),
+            d_weight.data().get(), d_bias.data().get(), N, C, block_size);
+#if !defined(ENABLE_BF16) && !defined(ENABLE_FP16)
+        float tol = 1e-5;
+#else
+        float tol = 1e-2f;
+#endif
+        validate_result(d_mean.data().get(), h_mean.data(), "mean", N, tol);
+        validate_result(d_rstd.data().get(), h_rstd.data(), "rstd", N, tol);
+        validate_result(d_out.data().get(), h_out.data(), "out", N * C, tol);
+    }
+
+    printf("All results match. Starting benchmarks.\n\n");
+
+    //_______________BENCHMARK___________________//
+    for (int j = 0; j < sizeof(block_sizes) / sizeof(int); j++)
+    {
+        int block_size = block_sizes[j];
+
+        int repeat_times = 100;
+        float elapsed_time = benchmark_kernel(repeat_times, layernorm, kernel_id, d_in.data().get(), d_out.data().get(),
+            d_mean.data().get(), d_rstd.data().get(), d_weight.data().get(), d_bias.data().get(), N, C, block_size);
+
+        long memory_ops = N * C * 4 * 4;
+        float memory_bandwidth = memory_ops / elapsed_time / 1e6;
+
+        printf("block_size %4d | time %.4f ms | bandwidth %.2f GB/s\n", block_size, elapsed_time, memory_bandwidth);
+    }
+
+    return 0;
+}

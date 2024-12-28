@@ -129,11 +129,11 @@ class MultiHeadAttention(nn.Module):
         self._norm_factor = 1.0 / sqrt(head_size)
 
     def forward(self, x):
-        q = self.Q(x).view(B, T, num_heads, dim_k // self.num_heads) # B * T * num_heads * head_size
-        k = self.K(x).view(B, T, num_heads, dim_k // self.num_heads) # B * T * num_heads * head_size
-        v = self.V(x).view(B, T, num_heads, dim_v // self.num_heads) # B * T * num_heads * head_size
+        q = self.Q(x).view(B, T, num_heads, dim_k // self.num_heads).permute(0, 2, 1, 3) #[B, num_heads, T, D_K]
+        k = self.K(x).view(B, T, num_heads, dim_k // self.num_heads).permute(0, 2, 1, 3) #[B, num_heads, T, D_K]
+        v = self.V(x).view(B, T, num_heads, dim_v // self.num_heads).permute(0, 2, 1, 3) #[B, num_heads, T, D_K]
 
-        attention = torch.bmm(q, k.permute(0, 1, 3, 2)) # B * num_heads * T * T
+        attention = torch.bmm(q, k.permute(-1, -2)) # [B, num_heads, T, T]
         attention = nn.Softmax(dim=-1)(attention) * self._norm_factor # B * num_heads * T * T
 
         output = torch.bmm(attention, v) # B * num_heads * T * head_size
@@ -143,3 +143,9 @@ class MultiHeadAttention(nn.Module):
 
 
 ```
+
+## Flash Attention
+
+
+一些参考学习的链接:
+[[Attention优化][2w字]🔥原理&图解: 从Online-Softmax到FlashAttention V1/V2/V3](https://www.cvmart.net/community/detail/14806)

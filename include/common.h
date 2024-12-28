@@ -145,6 +145,7 @@ template <class D, class T>
 void validate_result(
     D* device_result, const T* cpu_reference, const char* name, std::size_t elements_num, T tolerance = 1e-4)
 {
+    printf("Now checking %s\n", name);
     D* gpu_out = (D*) malloc(elements_num * sizeof(D));
     cudaCheck(cudaMemcpy(gpu_out, device_result, elements_num * sizeof(D), cudaMemcpyDeviceToHost));
     int nfaults = 0;
@@ -167,7 +168,7 @@ void validate_result(
         if (fabs(cpu_reference[i] - (T) gpu_out[i]) > t_eff)
         {
             nfaults++;
-            printf("Error: %s[%d] = %f, expected CPU: %f vs GPU: %f\n", name, i, cpu_reference[i], cpu_reference[i],
+            printf("Error: %s[%d] = %f, expected CPU: %f vs GPU: %f\n", name, i, (T) gpu_out[i], cpu_reference[i],
                 (T) gpu_out[i]);
         }
         if (nfaults > 10)
