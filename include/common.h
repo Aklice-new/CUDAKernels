@@ -159,11 +159,11 @@ void validate_result(
         // 去除无效值 or 跳过mask的值
         if (!std::isfinite(cpu_reference[i]))
             continue;
-        // print the first few comparisons
-        if (i < 5)
-        {
-            printf("%f %f\n", cpu_reference[i], (T) gpu_out[i]);
-        }
+        // // print the first few comparisons
+        // if (i < 5)
+        // {
+        //     printf("%f %f\n", cpu_reference[i], (T) gpu_out[i]);
+        // }
         float t_eff = tolerance + fabs(cpu_reference[i]) * epsilon;
         if (fabs(cpu_reference[i] - (T) gpu_out[i]) > t_eff)
         {
@@ -214,6 +214,41 @@ float benchmark_kernel(int repeats, Kernel kernel, KernelArgs&&... kerne_args)
     return elapsed_time / repeats;
 }
 
+float benchmark_cublas(int repeats, cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb, int m,
+    int n, int k, const float* alpha, const float* A, int lda, const float* B, int ldb, const float* beta, float* C,
+    int ldc)
+{
+    cudaEvent_t start, stop;
+    int deviceIdx = 0;
+    cudaCheck(cudaSetDevice(deviceIdx));
+    cudaDeviceProp deviceProp;
+    cudaCheck(cudaGetDeviceProperties(&deviceProp, deviceIdx));
+    // 刷新一下L2缓存, 以避免干扰测试,stackoverflow上说的方法可以通过cudamemset来刷L2缓存
+    void* flush_buffer;
+    cudaCheck(cudaMalloc(&flush_buffer, deviceProp.l2CacheSize));
+
+    cudaCheck(cudaEventCreate(&start));
+    cudaCheck(cudaEventCreate(&stop));
+
+    float elapsed_time = 0.0f;
+    for (int i = 0; i < repeats; i++)
+    {
+        cudaCheck(cudaMemset(flush_buffer, 0, deviceProp.l2CacheSize));
+        cudaCheck(cudaEventRecord(start, 0));
+        cublasSgemm(handle, transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+        cudaCheck(cudaEventRecord(stop, 0));
+        cudaCheck(cudaEventSynchronize(start));
+        cudaCheck(cudaEventSynchronize(stop));
+        float time;
+        cudaCheck(cudaEventElapsedTime(&time, start, stop));
+        elapsed_time += time;
+    }
+
+    cudaCheck(cudaFree(flush_buffer));
+
+    return elapsed_time / repeats;
+}
+
 //________________________RENDOM UTILS________________________//
 // ----------------------------------------------------------------------------
 // random utils
@@ -234,6 +269,16 @@ void make_random_float(float* arr, size_t N)
     for (size_t i = 0; i < N; i++)
     {
         arr[i] = ((float) rand() / RAND_MAX) * 2.0 - 1.0; // range -1..1
+    }
+    // return arr;
+}
+
+void make_positive_random_float(float* arr, size_t N)
+{
+    // float* arr = (float*) malloc(N * sizeof(float));
+    for (size_t i = 0; i < N; i++)
+    {
+        arr[i] = (float) rand() / RAND_MAX * 100; // range
     }
     // return arr;
 }

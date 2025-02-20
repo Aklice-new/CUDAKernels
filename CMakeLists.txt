@@ -13,8 +13,13 @@ set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_OBJECTS 0)
 # include(${ROOT_DIR}/cmake/FindCUDA.cmake)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_86,code=sm_86")
 
+# set(CMAKE_BUILD_TYPE "Debug")
+# SET(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wall -g -ggdb")
+
 # include(${ROOT_DIR}/cmake/*.cmake)
 include_directories(${ROOT_DIR}/include)
+# cutlass
+include_directories(${ROOT_DIR}/3rd/cutlass/include)
 
 add_executable(elementwise elementwise/elementwise.cu)
 target_link_libraries(elementwise PRIVATE cudart cublas)
@@ -26,3 +31,22 @@ target_link_libraries(softmax PRIVATE cudart cublas)
 
 add_executable(layernorm layernorm/layernorm.cu)
 target_link_libraries(layernorm PRIVATE cudart cublas)
+
+add_executable(test_mma cutlass/code/test_mma.cu)
+target_link_libraries(test_mma PRIVATE cudart cublas)
+
+
+add_executable(test_gemm gemm/gemm.cu)
+target_link_libraries(test_gemm PRIVATE cudart cublas)
+add_executable(test_cublas gemm/test_cublas.cu)
+target_link_libraries(test_cublas PRIVATE cudart cublas)
+
+
+add_executable(test_transpose transpose/transpose.cu)
+target_link_libraries(test_transpose PRIVATE cudart cublas)
+
+
+add_executable(test_top_k top-k/top_k.cu)
+target_link_libraries(test_top_k PRIVATE cudart cublas)
+
+
