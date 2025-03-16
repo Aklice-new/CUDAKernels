@@ -607,7 +607,6 @@ __global__ void gemm_kernel6(float* __restrict__ A, float* __restrict__ B, float
         FLOAT4(r_load_a[0]) = FLOAT4(A[load_gmem_a_addr]);
         FLOAT4(r_load_b[0]) = FLOAT4(B[load_gmem_b_addr]);
 
-        // compute for K = tile - 1
         for (int k = 0; k < BK; k++)
         {
             FLOAT4(r_compute_a[0]) = FLOAT4(As[now_stage][k][ty * TM]);
@@ -664,6 +663,127 @@ __global__ void gemm_kernel6(float* __restrict__ A, float* __restrict__ B, float
     }
 }
 
+/* no bankconflict version*/
+template <int BM, int BN, int BK, int TM, int TN>
+__global__ void gemm_kernel7(float* __restrict__ A, float* __restrict__ B, float* __restrict__ C, int M, int N, int K)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int tid = ty * blockDim.x + tx;
+
+    int load_smem_a_m = tid / 2;
+    int load_smem_a_k = (tid & 1) << 2;
+    int load_smem_b_k = tid / 32;
+    int load_smem_b_n = (tid & 31) << 2;
+
+    int load_gmem_a_m = by * BM + load_smem_a_m;
+    int load_gmem_b_n = bx * BN + load_smem_b_n;
+    // if (load_gmem_a_m >= M || load_gmem_b_n >= N)
+    // {
+    //     return;
+    // }
+    __shared__ float As[2][BK][BM];
+    __shared__ float Bs[2][BK][BN]; // 2 times space for double buffer
+
+    // float frag_a[2][TM], frag_b[2][TN];
+    float r_load_a[TM / 2]; // 每个线程负责4个元素的加载
+    float r_load_b[TN / 2];
+    float r_compute_a[TM]; // 计算的时候是8个元素
+    float r_compute_b[TN];
+    float r_c[TM][TN] = {0};
+    // copy data for K = 0, copy data to buffer 0
+    {
+        int load_gmem_a_addr = load_gmem_a_m * K + load_smem_a_k;
+        int load_gmem_b_addr = load_smem_b_k * N + load_gmem_b_n;
+        FLOAT4(r_load_a[0]) = FLOAT4(A[load_gmem_a_addr]);
+        FLOAT4(r_load_b[0]) = FLOAT4(B[load_gmem_b_addr]);
+
+        FLOAT4(Bs[0][load_smem_b_k][load_smem_b_n]) = FLOAT4(r_load_b[0]);
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+        {
+            As[0][load_smem_a_k + i][load_smem_a_m] = r_load_a[i];
+        }
+    }
+    __syncthreads();
+
+    // 对于tile_i，当前循环进行的是tile_i-1的计算，和tile_i的数据加载
+    for (int tile = 1; tile < K / BK; tile++)
+    {
+        // stage的编号： 0:0, 1:1, 2:0, 3:1, 4:0, 5:1 ... K/BK - 1:?
+        // copy data for K = tile
+        int now_stage = (tile - 1) & 1;
+        int nxt_stage = now_stage ^ 1;
+        int load_gmem_a_addr = load_gmem_a_m * K + tile * BK + load_smem_a_k;
+        int load_gmem_b_addr = (tile * BK + load_smem_b_k) * N + load_gmem_b_n;
+
+        FLOAT4(r_load_a[0]) = FLOAT4(A[load_gmem_a_addr]);
+        FLOAT4(r_load_b[0]) = FLOAT4(B[load_gmem_b_addr]);
+
+        for (int k = 0; k < BK; k++)
+        {
+            FLOAT4(r_compute_a[0]) = FLOAT4(As[now_stage][k][ty * TM / 2]);
+            FLOAT4(r_compute_a[4]) = FLOAT4(As[now_stage][k][ty * TM / 2 + BM / 2]);
+            FLOAT4(r_compute_b[0]) = FLOAT4(Bs[now_stage][k][tx * TN / 2]);
+            FLOAT4(r_compute_b[4]) = FLOAT4(Bs[now_stage][k][tx * TN / 2 + BN / 2]);
+            for (int m = 0; m < TM; m++)
+            {
+                for (int n = 0; n < TN; n++)
+                {
+                    r_c[m][n] += r_compute_a[m] * r_compute_b[n];
+                }
+            }
+        }
+
+        FLOAT4(Bs[nxt_stage][load_smem_b_k][load_smem_b_n]) = FLOAT4(r_load_b[0]);
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+        {
+            As[nxt_stage][load_smem_a_k + i][load_smem_a_m] = r_load_a[i];
+        }
+        __syncthreads();
+    }
+
+    // for last tile
+
+    {
+        for (int k = 0; k < BK; k++)
+        {
+            FLOAT4(r_compute_a[0]) = FLOAT4(As[1][k][ty * TM / 2]);
+            FLOAT4(r_compute_a[4]) = FLOAT4(As[1][k][ty * TM / 2 + BM / 2]);
+            FLOAT4(r_compute_b[0]) = FLOAT4(Bs[1][k][tx * TN / 2]);
+            FLOAT4(r_compute_b[4]) = FLOAT4(Bs[1][k][tx * TN / 2 + BN / 2]);
+            for (int m = 0; m < TM; m++)
+            {
+                for (int n = 0; n < TN; n++)
+                {
+                    r_c[m][n] += r_compute_a[m] * r_compute_b[n];
+                }
+            }
+        }
+    }
+    // store result to C
+#pragma unroll
+    for (int m = 0; m < TM / 2; m++)
+    {
+        int gmem_c_m = by * BM + ty * TM / 2 + m;
+        int gmem_c_n = bx * BN + tx * TN / 2;
+        int gemm_c_addr = gmem_c_m * N + gmem_c_n;
+        FLOAT4(C[gemm_c_addr]) = FLOAT4(r_c[m][0]);
+        FLOAT4((C[gemm_c_addr + BN / 2])) = FLOAT4(FLOAT4(r_c[m][4]));
+    }
+    for (int m = 0; m < TM / 2; m++)
+    {
+        int gmem_c_m = by * BM + ty * TM / 2 + BM / 2 + m;
+        int gmem_c_n = bx * BN + tx * TN / 2;
+        int gemm_c_addr = gmem_c_m * N + gmem_c_n;
+        FLOAT4(C[gemm_c_addr]) = FLOAT4(r_c[m + TM / 2][0]);
+        FLOAT4((C[gemm_c_addr + BN / 2])) = FLOAT4(FLOAT4(r_c[m + TM / 2][4]));
+    }
+}
+
 void gemm_forward1(float* A, float* B, float* C, int M, int N, int K)
 {
     dim3 threads(16, 16);
@@ -705,7 +825,7 @@ void gemm_forward4(float* A, float* B, float* C, int M, int N, int K)
     constexpr int TN = 8;
     dim3 threads(BM / TM, BN / TN);
     dim3 blocks(CEIL_DIV(M, BM), CEIL_DIV(N, BN));
-    gemm_kernel6<BM, BN, BK, TM, TN><<<blocks, threads>>>(A, B, C, M, N, K);
+    gemm_kernel7<BM, BN, BK, TM, TN><<<blocks, threads>>>(A, B, C, M, N, K);
     cudaCheck(cudaGetLastError());
 }
 
