@@ -13,6 +13,10 @@ set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_OBJECTS 0)
 # include(${ROOT_DIR}/cmake/FindCUDA.cmake)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_86,code=sm_86")
 
+set(Torch_DIR /home/aklice/miniconda3/envs/d2l/lib/python3.9/site-packages/torch/include/)
+set(Torch_DIR ${Torch_DIR} /home/aklice/miniconda3/envs/d2l/lib/python3.9/site-packages/torch/include/torch/csrc/api/include)
+include_directories(${Torch_DIR})
+
 # set(CMAKE_BUILD_TYPE "Debug")
 # SET(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wall -g -ggdb")
 
@@ -48,5 +52,8 @@ target_link_libraries(test_transpose PRIVATE cudart cublas)
 
 add_executable(test_top_k top-k/top_k.cu)
 target_link_libraries(test_top_k PRIVATE cudart cublas)
+
+
+
 
 
