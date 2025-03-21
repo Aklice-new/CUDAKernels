@@ -37,15 +37,25 @@ __global__ void reduce_sum_kernel1(float* output, const float* input, int N, int
         s_sum[warp_id] = sum;
     }
     __syncthreads();
-    // then block level reduce blockDim.x / WARP_SIZE elements if (tid == 0)
+    // still warp level reduce
+    // because the max blockDim.x is 1024 , 1024 / 32 = 32, so one warp is enough
+    if (tid < (blockDim.x / WARP_SIZE))
     {
-        float res = 0;
-        for (int i = 0; i < blockDim.x / WARP_SIZE; i++)
+        sum = (tid < (blockDim.x / WARP_SIZE)) ? s_sum[tid] : 0;
+        sum = warp_reduce_sum(sum);
+        if (tid == 0)
         {
-            res += s_sum[i];
+            output[row] = sum;
         }
-        output[row] = res;
     }
+    // {
+    //     float res = 0;
+    //     for (int i = 0; i < blockDim.x / WARP_SIZE; i++)
+    //     {
+    //         res += s_sum[i];
+    //     }
+    //     output[row] = res;
+    // }
 }
 
 /*

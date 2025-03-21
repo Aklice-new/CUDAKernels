@@ -24,7 +24,7 @@ input = torch.arange(N * C, device='cuda', dtype=torch.float32).reshape(N, C)
 
 output = torch.sum(input, dim=1)
 my_output = torch.zeros(N, device='cuda', dtype=torch.float32)
-my_reduce_sum.reduce_sum2(input, my_output)
+my_reduce_sum.reduce_sum1(input, my_output)
 
 print(output)
 
