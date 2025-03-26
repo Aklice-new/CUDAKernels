@@ -18,16 +18,15 @@ my_reduce_sum = load(
     extra_cflags=['-std=c++17']
 )
 
-N = 192912
-C = 1121
+N = 4096
+C = 112190
 input = torch.arange(N * C, device='cuda', dtype=torch.float32).reshape(N, C)
 
 output = torch.sum(input, dim=1)
 my_output = torch.zeros(N, device='cuda', dtype=torch.float32)
-my_reduce_sum.reduce_sum1(input, my_output)
 
-print(output)
 
-print(my_output)
+with torch.autograd.profiler.profile(use_cuda=True) as prof:
+    my_reduce_sum.reduce_sum3(input, my_output)
 
-print(torch.allclose(output, my_output))
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
