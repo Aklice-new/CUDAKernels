@@ -7,6 +7,7 @@
 __device__ float warp_reduce_sum(float val)
 {
     for (int offset = 16; offset >= 1; offset /= 2)
+    // for (int offset = 1; offset <= 16; offset <<= 1)
     {
         val += __shfl_down_sync(0xffffffff, val, offset);
     }
